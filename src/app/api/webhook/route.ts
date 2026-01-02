@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { stripe, formatAmountFromStripe } from '@/lib/stripe';
-import { markCashflowAsPaid, getCashflowByHash, recordStripePayment } from '@/lib/db';
+import { getCashflowDetailsByHash, markQVCashflowAsPaid } from '@/lib/quotevine';
 import Stripe from 'stripe';
 
 export async function POST(request: NextRequest) {
@@ -39,39 +39,35 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Missing metadata' }, { status: 400 });
     }
 
-    try {
-      const cashflow = await getCashflowByHash(hash);
-      if (!cashflow) {
-        console.error('Cashflow not found for hash:', hash);
-        return NextResponse.json({ error: 'Cashflow not found' }, { status: 404 });
-      }
+    // Get the cashflow details from QV APIs
+    const cashflow = await getCashflowDetailsByHash(hash);
+    if (!cashflow) {
+      console.error('Cashflow not found for hash:', hash);
+      return NextResponse.json({ error: 'Cashflow not found' }, { status: 404 });
+    }
 
-      const amountPaid = formatAmountFromStripe(amountTotal);
+    const amountPaid = formatAmountFromStripe(amountTotal);
 
-      // Record the Stripe payment
-      await recordStripePayment(
-        cashflow.clientId,
-        parseInt(cashflowId),
-        session.payment_intent as string,
-        amountPaid,
-        'succeeded'
-      );
+    // Mark the cashflow as paid via QuoteVine API
+    if (!cashflow.isFullyPaid) {
+      const today = new Date().toISOString().split('T')[0];
+      const totalPaid = cashflow.paidAmount + amountPaid;
 
-      // Mark the cashflow as paid
-      await markCashflowAsPaid(
-        parseInt(cashflowId),
-        amountPaid,
+      const success = await markQVCashflowAsPaid(
+        cashflow.ids,
+        totalPaid,
+        today,
         session.payment_intent as string
       );
 
-      console.log(`Payment successful for cashflow ${cashflowId}: £${amountPaid}`);
-    } catch (error) {
-      console.error('Error processing payment:', error);
-      return NextResponse.json(
-        { error: 'Failed to process payment' },
-        { status: 500 }
-      );
+      if (!success) {
+        console.error('Failed to update cashflow via QV API');
+      } else {
+        console.log(`Successfully marked cashflow ${cashflow.ids.cashflowId} as paid via QV API`);
+      }
     }
+
+    console.log(`Payment successful for cashflow ${cashflowId}: £${amountPaid}`);
   }
 
   return NextResponse.json({ received: true });

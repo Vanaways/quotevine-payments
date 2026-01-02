@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { stripe, formatAmountFromStripe } from '@/lib/stripe';
-import { markCashflowAsPaid, getCashflowByHash, recordStripePayment } from '@/lib/db';
+import { getCashflowDetailsByHash, markQVCashflowAsPaid } from '@/lib/quotevine';
 
 export async function POST(request: NextRequest) {
   try {
@@ -34,8 +34,8 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Get the cashflow to check current status
-    const cashflow = await getCashflowByHash(hash);
+    // Get the cashflow details from QV APIs
+    const cashflow = await getCashflowDetailsByHash(hash);
     if (!cashflow) {
       return NextResponse.json(
         { error: 'Cashflow not found' },
@@ -46,26 +46,39 @@ export async function POST(request: NextRequest) {
     const amountPaid = formatAmountFromStripe(amountTotal);
 
     // Only update if not already fully paid (prevents double processing)
-    if (cashflow.fullyPaidFlag !== 'Y') {
-      try {
-        // Record the Stripe payment
-        await recordStripePayment(
-          cashflow.clientId,
-          parseInt(cashflowId),
-          session.payment_intent as string,
-          amountPaid,
-          'succeeded'
-        );
+    if (!cashflow.isFullyPaid) {
+      // Mark the cashflow as paid via QuoteVine API
+      const today = new Date().toISOString().split('T')[0];
+      const totalPaid = cashflow.paidAmount + amountPaid;
 
-        // Mark the cashflow as paid
-        await markCashflowAsPaid(
-          parseInt(cashflowId),
-          amountPaid,
-          session.payment_intent as string
+      const success = await markQVCashflowAsPaid(
+        cashflow.ids,
+        totalPaid,
+        today,
+        session.payment_intent as string
+      );
+
+      if (!success) {
+        console.error('Failed to update cashflow via QV API');
+      } else {
+        console.log(`Successfully marked cashflow ${cashflow.ids.cashflowId} as paid via QV API`);
+      }
+    }
+
+    // Get receipt URL from the payment intent
+    let receiptUrl: string | null = null;
+    if (session.payment_intent) {
+      try {
+        const paymentIntent = await stripe.paymentIntents.retrieve(
+          session.payment_intent as string,
+          { expand: ['latest_charge'] }
         );
-      } catch (dbError) {
-        // Payment might have already been processed by webhook
-        console.log('Payment may have already been processed:', dbError);
+        const latestCharge = paymentIntent.latest_charge;
+        if (latestCharge && typeof latestCharge === 'object' && 'receipt_url' in latestCharge) {
+          receiptUrl = latestCharge.receipt_url;
+        }
+      } catch (err) {
+        console.log('Could not retrieve receipt URL:', err);
       }
     }
 
@@ -73,6 +86,7 @@ export async function POST(request: NextRequest) {
       success: true,
       amount: amountPaid,
       paymentIntent: session.payment_intent,
+      receiptUrl,
     });
   } catch (error) {
     console.error('Verify payment error:', error);

@@ -13,8 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "QuoteVine Payments",
-  description: "Secure payment processing for QuoteVine invoices",
+  title: "Vanaways Payments",
+  description: "Secure payment processing for Vanaways invoices",
 };
 
 export default function RootLayout({
